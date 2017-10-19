@@ -259,7 +259,7 @@ performRequestCT ct reqMethod req = do
   let acceptCTS = contentTypes ct
   (_status, respBody, respCT, hdrs, _response) <-
     performRequest reqMethod (req { reqAccept = toList acceptCTS })
-  unless (any (matches respCT) acceptCTS) $ throwError $ UnsupportedContentType respCT respBody
+  unless (any (flip matches respCT) acceptCTS) $ throwError $ UnsupportedContentType respCT respBody
   case mimeUnrender ct respBody of
     Left err -> throwError $ DecodeFailure err respCT respBody
     Right val -> return (hdrs, val)
