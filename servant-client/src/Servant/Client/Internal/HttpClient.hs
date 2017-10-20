@@ -134,7 +134,8 @@ requestToClientRequest burl r = Client.defaultRequest
   , Client.queryString = renderQuery True . toList $ requestQueryString r
   , Client.requestHeaders =
       let orig = toList $ requestHeaders r
-      in maybe orig (: orig) contentTypeHdr
+          accepts = toList $ fmap (\typ -> ("Accept", renderHeader typ)) $ requestAccept r
+      in maybe orig (: orig) contentTypeHdr <> accepts
   , Client.requestBody = body
   , Client.secure = isSecure
   }

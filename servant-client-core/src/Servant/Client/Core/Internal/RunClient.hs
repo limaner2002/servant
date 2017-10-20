@@ -39,7 +39,7 @@ decodedAs :: forall ct a m. (MimeUnrender ct a, RunClient m)
   => Response -> Proxy ct -> m a
 decodedAs response contentType = do
   responseContentType <- checkContentTypeHeader response
-  unless (any (matches responseContentType) accept) $
+  unless (any (flip matches responseContentType) accept) $
     throwServantError $ UnsupportedContentType responseContentType response
   case mimeUnrender contentType $ responseBody response of
     Left err -> throwServantError $ DecodeFailure (T.pack err) response
