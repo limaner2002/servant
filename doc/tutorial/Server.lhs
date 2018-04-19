@@ -18,6 +18,7 @@ need to have some language extensions and imports:
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeOperators #-}
 
@@ -203,7 +204,7 @@ And that's it! You can run this example in the same way that we showed for
 
 Fine, we can write trivial webservices easily, but none of the two above use
 any "fancy" combinator from servant. Let's address this and use `QueryParam`,
-`Capture` and `ReqBody` right away. You'll see how each occurence of these
+`Capture` and `ReqBody` right away. You'll see how each occurrence of these
 combinators in an endpoint makes the corresponding handler receive an
 argument of the appropriate type automatically. You don't have to worry about
 manually looking up URL captures or query string parameters, or
@@ -1020,6 +1021,17 @@ serverFor = error "..."
 -- or the mailing list if you get stuck!
 ```
 
+When your API contains the `EmptyAPI` combinator, you'll want to use
+`emptyServer` in the corresponding slot for your server, which will simply fail
+with 404 whenever a request reaches it:
+
+``` haskell
+type CombinedAPI2 = API :<|> "empty" :> EmptyAPI
+
+server11 :: Server CombinedAPI2
+server11 = server3 :<|> emptyServer
+```
+
 ## Using another monad for your handlers
 
 Remember how `Server` turns combinators for HTTP methods into `Handler`? Well, actually, there's more to that. `Server` is actually a
@@ -1046,75 +1058,71 @@ into something **servant** can understand?
 If we have a function that gets us from an `m a` to an `n a`, for any `a`, what
 do we have?
 
-``` haskell ignore
-newtype m :~> n = NT { ($$) :: forall a. m a -> n a}
+``` haskell
+type (~>) m n = forall a. m a -> n a
 ```
 
 For example:
 
 ``` haskell
-listToMaybeNT :: [] :~> Maybe
-listToMaybeNT = NT listToMaybe  -- from Data.Maybe
+listToMaybe' :: [] ~> Maybe
+listToMaybe' = listToMaybe -- from Data.Maybe
 ```
 
-(`NT` comes from "natural transformation", in case you're wondering.)
+Note that `servant` doesn't declare the `~>` type-alias, as the unfolded
+variant isn't much longer to write, as we'll see shortly.
 
 So if you want to write handlers using another monad/type than `Handler`, say the `Reader String` monad, the first thing you have to
 prepare is a function:
 
 ``` haskell ignore
-readerToHandler :: Reader String :~> Handler
+readerToHandler :: Reader String a -> Handler a
 ```
 
-Let's start with `readerToHandler'`. We obviously have to run the `Reader`
-computation by supplying it with a `String`, like `"hi"`. We get an `a` out
-from that and can then just `return` it into `Handler`. We can then just wrap
-that function with the `NT` constructor to make it have the fancier type.
+We obviously have to run the `Reader` computation by supplying it with a
+`String`, like `"hi"`. We get an `a` out from that and can then just `return`
+it into `Handler`.
 
 ``` haskell
-readerToHandler' :: forall a. Reader String a -> Handler a
-readerToHandler' r = return (runReader r "hi")
-
-readerToHandler :: Reader String :~> Handler
-readerToHandler = NT readerToHandler'
+readerToHandler :: Reader String a -> Handler a
+readerToHandler r = return (runReader r "hi")
 ```
 
 We can write some simple webservice with the handlers running in `Reader String`.
 
 ``` haskell
 type ReaderAPI = "a" :> Get '[JSON] Int
-            :<|> "b" :> Get '[JSON] String
+            :<|> "b" :> ReqBody '[JSON] Double :> Get '[JSON] Bool
 
 readerAPI :: Proxy ReaderAPI
 readerAPI = Proxy
 
 readerServerT :: ServerT ReaderAPI (Reader String)
-readerServerT = a :<|> b
+readerServerT = a :<|> b where
+    a :: Reader String Int
+    a = return 1797
 
-  where a :: Reader String Int
-        a = return 1797
-
-        b :: Reader String String
-        b = ask
+    b :: Double -> Reader String Bool
+    b _ = asks (== "hi")
 ```
 
 We unfortunately can't use `readerServerT` as an argument of `serve`, because
 `serve` wants a `Server ReaderAPI`, i.e., with handlers running in `Handler`. But there's a simple solution to this.
 
-### Enter `enter`
+### Welcome `hoistServer`
 
 That's right. We have just written `readerToHandler`, which is exactly what we
 would need to apply to all handlers to make the handlers have the
 right type for `serve`. Being cumbersome to do by hand, we provide a function
-`enter` which takes a natural transformation between two parametrized types `m`
+`hoistServer` which takes a natural transformation between two parameterized types `m`
 and `n` and a `ServerT someapi m`, and returns a `ServerT someapi n`.
 
-In our case, we can wrap up our little webservice by using `enter
-readerToHandler` on our handlers.
+In our case, we can wrap up our little webservice by using
+`hoistServer readerAPI readerToHandler` on our handlers.
 
 ``` haskell
 readerServer :: Server ReaderAPI
-readerServer = enter readerToHandler readerServerT
+readerServer = hoistServer readerAPI readerToHandler readerServerT
 
 app4 :: Application
 app4 = serve readerAPI readerServer
@@ -1128,6 +1136,54 @@ $ curl http://localhost:8081/a
 $ curl http://localhost:8081/b
 "hi"
 ```
+
+### An arrow is a reader too.
+
+In previous versions of `servant` we had an `enter` to do what `hoistServer`
+does now. `enter` had a ambitious design goals, but was problematic in practice.
+
+One problematic situation was when the source monad was `(->) r`, yet it's
+handy in practice, because `(->) r` is isomorphic to `Reader r`.
+
+We can rewrite the previous example without `Reader`:
+
+```haskell
+funServerT :: ServerT ReaderAPI ((->) String)
+funServerT = a :<|> b where
+    a :: String -> Int
+    a _ = 1797
+
+    -- unfortunately, we cannot make `String` the first argument.
+    b :: Double -> String -> Bool
+    b _ s = s == "hi"
+
+funToHandler :: (String -> a) -> Handler a
+funToHandler f = return (f "hi")
+
+app5 :: Application
+app5 = serve readerAPI (hoistServer readerAPI funToHandler funServerT)
+```
+
+## Streaming endpoints
+
+We can create endpoints that don't just give back a single result, but give back a *stream* of results, served one at a time. Stream endpoints only provide a single content type, and also specify what framing strategy is used to delineate the results. To serve these results, we need to give back a stream producer. Adapters can be written to `Pipes`, `Conduit` and the like, or written directly as `StreamGenerator`s. StreamGenerators are IO-based continuations that are handed two functions -- the first to write the first result back, and the second to write all subsequent results back. (This is to allow handling of situations where the entire stream is prefixed by a header, or where a boundary is written between elements, but not prior to the first element). The API of a streaming endpoint needs to explicitly specify which sort of generator it produces. Note that the generator itself is returned by a `Handler` action, so that additional IO may be done in the creation of one.
+
+``` haskell
+type StreamAPI = "userStream" :> StreamGet NewlineFraming JSON (StreamGenerator User)
+streamAPI :: Proxy StreamAPI
+streamAPI = Proxy
+
+streamUsers :: StreamGenerator User
+streamUsers = StreamGenerator $ \sendFirst sendRest -> do
+                       sendFirst isaac
+                       sendRest  albert
+                       sendRest  albert
+
+app6 :: Application
+app6 = serve streamAPI (return streamUsers)
+```
+
+This simple application returns a stream of `User` values encoded in JSON format, with each value separated by a newline. In this case, the stream will consist of the value of `isaac`, followed by the value of `albert`, then the value of `albert` a third time. Importantly, the stream is written back as results are produced, rather than all at once. This means first that results are delivered when they are available, and second, that if an exception interrupts production of the full stream, nonetheless partial results have already been written back.
 
 ## Conclusion
 

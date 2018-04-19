@@ -1,0 +1,15 @@
+packages:
+  basic-auth/
+  db-sqlite-simple/
+  db-postgres-pool/
+  using-custom-monad/
+  jwt-and-basic-auth/
+  file-upload/
+  structuring-apis/
+  https/
+  ../../servant
+  ../../servant-server
+  ../../servant-client-core
+  ../../servant-client
+  ../../servant-docs
+  ../../servant-foreign

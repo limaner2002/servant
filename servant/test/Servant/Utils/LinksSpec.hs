@@ -1,7 +1,12 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds       #-}
 {-# LANGUAGE PolyKinds       #-}
 {-# LANGUAGE TypeOperators   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+#if __GLASGOW_HASKELL__ < 709
+{-# OPTIONS_GHC -fcontext-stack=41 #-}
+#endif
 module Servant.Utils.LinksSpec where
 
 import           Data.Proxy              (Proxy (..))
@@ -10,10 +15,13 @@ import           Test.Hspec              (Expectation, Spec, describe, it,
 import           Data.String             (fromString)
 
 import           Servant.API
+import           Servant.Utils.Links     (allLinks, linkURI)
+import           Servant.API.Internal.Test.ComprehensiveAPI (comprehensiveAPIWithoutRaw)
 
 type TestApi =
   -- Capture and query params
        "hello" :> Capture "name" String :> QueryParam "capital" Bool :> Delete '[JSON] NoContent
+  :<|> "hi"    :> Capture "name" String :> QueryParam' '[Required] "capital" Bool :> Delete '[JSON] NoContent
   :<|> "all" :> CaptureAll "names" String :> Get '[JSON] NoContent
 
   -- Flags
@@ -22,9 +30,14 @@ type TestApi =
   -- All of the verbs
   :<|> "get" :> Get '[JSON] NoContent
   :<|> "put" :> Put '[JSON] NoContent
-  :<|> "post" :> ReqBody '[JSON] 'True :> Post '[JSON] NoContent
+  :<|> "post" :> ReqBody '[JSON] Bool :> Post '[JSON] NoContent
   :<|> "delete" :> Header "ponies" String :> Delete '[JSON] NoContent
   :<|> "raw" :> Raw
+  :<|> NoEndpoint
+
+type LinkableApi =
+       "all" :> CaptureAll "names" String :> Get '[JSON] NoContent
+  :<|> "get" :> Get '[JSON] NoContent
 
 
 apiLink :: (IsElem endpoint TestApi, HasLink endpoint)
@@ -48,6 +61,11 @@ spec = describe "Servant.Utils.Links" $ do
                                          :> Delete '[JSON] NoContent)
         apiLink l2 "bye" (Just True) `shouldBeLink` "hello/bye?capital=true"
 
+        let l4 = Proxy :: Proxy ("hi" :> Capture "name" String
+                                      :> QueryParam' '[Required] "capital" Bool
+                                      :> Delete '[JSON] NoContent)
+        apiLink l4 "privet" False `shouldBeLink` "hi/privet?capital=false"
+
     it "generates correct links for CaptureAll" $ do
         apiLink (Proxy :: Proxy ("all" :> CaptureAll "names" String :> Get '[JSON] NoContent))
           ["roads", "lead", "to", "rome"]
@@ -66,14 +84,24 @@ spec = describe "Servant.Utils.Links" $ do
         apiLink (Proxy :: Proxy ("delete" :> Delete '[JSON] NoContent)) `shouldBeLink` "delete"
         apiLink (Proxy :: Proxy ("raw" :> Raw)) `shouldBeLink` "raw"
 
+    it "can generate all links for an API that has only linkable endpoints" $ do
+        let (allNames :<|> simple) = allLinks (Proxy :: Proxy LinkableApi)
+        simple `shouldBeLink` "get"
+        allNames ["Seneca", "Aurelius"] `shouldBeLink` "all/Seneca/Aurelius"
+
+    it "can generate all links for ComprehensiveAPIWithoutRaw" $ do
+        let (firstLink :<|> _) = allLinks comprehensiveAPIWithoutRaw
+        firstLink `shouldBeLink` ""
 
 -- |
 -- Before https://github.com/CRogers/should-not-typecheck/issues/5 is fixed,
 -- we'll just use doctest
 --
+-- with TypeError comparing for errors is difficult.
+--
 -- >>> apiLink (Proxy :: Proxy WrongPath)
 -- ...
--- ...Could not deduce...
+-- ......:...:...
 -- ...
 --
 -- >>> apiLink (Proxy :: Proxy WrongReturnType)
@@ -83,7 +111,7 @@ spec = describe "Servant.Utils.Links" $ do
 --
 -- >>> apiLink (Proxy :: Proxy WrongContentType)
 -- ...
--- ...Could not deduce...
+-- ......:...:...
 -- ...
 --
 -- >>> apiLink (Proxy :: Proxy WrongMethod)
@@ -96,6 +124,11 @@ spec = describe "Servant.Utils.Links" $ do
 -- ...Could not deduce...
 -- ...
 --
+-- >>> linkURI $ apiLink (Proxy :: Proxy NoEndpoint)
+-- ...
+-- <interactive>...
+-- ...
+--
 -- sanity check
 -- >>> toUrlPiece $ apiLink (Proxy :: Proxy AllGood)
 -- "get"
@@ -103,5 +136,6 @@ type WrongPath = "getTypo" :> Get '[JSON] NoContent
 type WrongReturnType = "get" :> Get '[JSON] Bool
 type WrongContentType = "get" :> Get '[OctetStream] NoContent
 type WrongMethod = "get" :> Post '[JSON] NoContent
-type NotALink = "hello" :> ReqBody '[JSON] 'True :> Get '[JSON] Bool
+type NotALink = "hello" :> ReqBody '[JSON] Bool :> Get '[JSON] Bool
 type AllGood = "get" :> Get '[JSON] NoContent
+type NoEndpoint = "empty" :> EmptyAPI

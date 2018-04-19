@@ -1,18 +1,18 @@
-flags: {}
+# Let's try to keep resolver at the first day of the month
+resolver: nightly-2018-01-01
 packages:
-- servant/
 - servant-client/
+- servant-client-core/
 - servant-docs/
 - servant-foreign/
 - servant-server/
-- doc/tutorial
+- servant/
+
 extra-deps:
-- http-api-data-0.3
-- servant-js-0.9.1
-- natural-transformation-0.4
-- hspec-2.3.2
-- hspec-discover-2.3.2
-- hspec-core-2.3.2
-- hspec-wai-0.8.0
-- hspec-expectations-0.8.2
-resolver: lts-6.27
+- cabal-doctest-1.0.6
+- http-api-data-0.3.7.2
+- http-types-0.12
+- text-1.2.3.0
+
+# allow-newer: true # ignores all bounds, that's a sledgehammer
+# - doc/tutorial/

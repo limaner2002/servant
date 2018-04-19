@@ -1,4 +1,17 @@
-{-# LANGUAGE CPP               #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses  #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+#if __GLASGOW_HASKELL__ < 709
+{-# OPTIONS_GHC -fcontext-stack=41 #-}
+#endif
 #include "overlapping-compat.h"
 
 module Servant.ForeignSpec where
@@ -51,19 +64,23 @@ instance OVERLAPPING_ HasForeignType LangX String String where
 instance OVERLAPPABLE_ HasForeignType LangX String a => HasForeignType LangX String [a] where
   typeFor lang ftype _ = "listX of " <> typeFor lang ftype (Proxy :: Proxy a)
 
+instance (HasForeignType LangX String a) => HasForeignType LangX String (Maybe a) where
+  typeFor lang ftype _ = "maybe " <> typeFor lang ftype (Proxy :: Proxy a)
+
 type TestApi
     = "test" :> Header "header" [String] :> QueryFlag "flag" :> Get '[JSON] Int
  :<|> "test" :> QueryParam "param" Int :> ReqBody '[JSON] [String] :> Post '[JSON] NoContent
  :<|> "test" :> QueryParams "params" Int :> ReqBody '[JSON] String :> Put '[JSON] NoContent
  :<|> "test" :> Capture "id" Int :> Delete '[JSON] NoContent
  :<|> "test" :> CaptureAll "ids" Int :> Get '[JSON] [Int]
+ :<|> "test" :> EmptyAPI
 
 testApi :: [Req String]
 testApi = listFromAPI (Proxy :: Proxy LangX) (Proxy :: Proxy String) (Proxy :: Proxy TestApi)
 
 listFromAPISpec :: Spec
 listFromAPISpec = describe "listFromAPI" $ do
-  it "generates 4 endpoints for TestApi" $ do
+  it "generates 5 endpoints for TestApi" $ do
     length testApi `shouldBe` 5
 
   let [getReq, postReq, putReq, deleteReq, captureAllReq] = testApi
@@ -74,7 +91,7 @@ listFromAPISpec = describe "listFromAPI" $ do
           [ Segment $ Static "test" ]
           [ QueryArg (Arg "flag" "boolX") Flag ]
       , _reqMethod     = "GET"
-      , _reqHeaders    = [HeaderArg $ Arg "header" "listX of stringX"]
+      , _reqHeaders    = [HeaderArg $ Arg "header" "maybe listX of stringX"]
       , _reqBody       = Nothing
       , _reqReturnType = Just "intX"
       , _reqFuncName   = FunctionName ["get", "test"]
@@ -84,7 +101,7 @@ listFromAPISpec = describe "listFromAPI" $ do
     shouldBe postReq $ defReq
       { _reqUrl        = Url
           [ Segment $ Static "test" ]
-          [ QueryArg (Arg "param" "intX") Normal ]
+          [ QueryArg (Arg "param" "maybe intX") Normal ]
       , _reqMethod     = "POST"
       , _reqHeaders    = []
       , _reqBody       = Just "listX of stringX"

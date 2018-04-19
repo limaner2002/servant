@@ -1,5 +1,6 @@
 **/*/dist
 dist-newstyle
+.ghc.environment.*
 /bin
 /lib
 /share
@@ -24,8 +25,6 @@ cabal.config
 *.hp
 Setup
 .stack-work
-shell.nix
-default.nix
 doc/_build
 doc/venv
 doc/tutorial/static/api.js

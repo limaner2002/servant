@@ -1,5 +1,4 @@
 {-# LANGUAGE CPP                    #-}
-{-# LANGUAGE DeriveDataTypeable     #-}
 {-# LANGUAGE FlexibleInstances      #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
@@ -8,7 +7,7 @@
 {-# LANGUAGE TypeFamilies           #-}
 {-# LANGUAGE TypeOperators          #-}
 {-# LANGUAGE UndecidableInstances   #-}
-module Servant.Utils.Enter (
+module Servant.Utils.Enter {-# DEPRECATED "Use hoistServer or hoistServerWithContext from servant-server" #-} (
     module Servant.Utils.Enter,
     -- * natural-transformation re-exports
     (:~>)(..),
@@ -22,26 +21,59 @@ import qualified Control.Monad.State.Lazy    as LState
 import qualified Control.Monad.State.Strict  as SState
 import qualified Control.Monad.Writer.Lazy   as LWriter
 import qualified Control.Monad.Writer.Strict as SWriter
+import           Data.Tagged                 (Tagged, retag)
 import           Prelude                     ()
 import           Prelude.Compat
-
 import           Servant.API
 
-class Enter typ arg ret | typ arg -> ret, typ ret -> arg where
-    enter :: arg -> typ -> ret
+-- | Helper type family to state the 'Enter' symmetry.
+type family Entered m n api where
+    Entered m n (a -> api)       = a -> Entered m n api
+    Entered m n (m a)            = n a
+    Entered m n (api1 :<|> api2) = Entered m n api1 :<|> Entered m n api2
+    Entered m n (Tagged m a)     = Tagged n a
 
--- **  Servant combinators
-instance ( Enter typ1 arg1 ret1, Enter typ2 arg2 ret2
-         , arg1 ~ arg2
-         ) => Enter (typ1 :<|> typ2) arg1 (ret1 :<|> ret2) where
+class
+    ( Entered m n typ ~ ret
+    , Entered n m ret ~ typ
+    ) => Enter typ m n ret | typ m n ->  ret, ret m n -> typ, ret typ m -> n, ret typ n -> m
+  where
+    -- | Map the leafs of an API type.
+    enter :: (m :~> n) -> typ -> ret
+
+-- ** Servant combinators
+
+instance
+    ( Enter typ1 m1 n1 ret1, Enter typ2 m2 n2 ret2
+    , m1 ~ m2, n1 ~ n2
+    , Entered m1 n1 (typ1 :<|> typ2) ~ (ret1 :<|> ret2)
+    , Entered n1 m1 (ret1 :<|> ret2) ~ (typ1 :<|> typ2)
+    ) => Enter (typ1 :<|> typ2) m1 n1 (ret1 :<|> ret2)
+  where
     enter e (a :<|> b) = enter e a :<|> enter e b
 
-instance (Enter b arg ret) => Enter (a -> b) arg (a -> ret) where
+instance
+    ( Enter typ m n ret
+    , Entered m n (a -> typ) ~ (a -> ret)
+    , Entered n m (a -> ret) ~ (a -> typ)
+    ) => Enter (a -> typ) m n (a -> ret)
+  where
     enter arg f a = enter arg (f a)
 
--- ** Useful instances
+-- ** Leaf instances
 
-instance Enter (m a) (m :~> n) (n a) where
+instance
+    ( Entered m n (Tagged m a) ~ Tagged n a
+    , Entered n m (Tagged n a) ~ Tagged m a
+    ) => Enter (Tagged m a) m n (Tagged n a)
+  where
+    enter _ = retag
+
+instance
+    ( Entered m n (m a) ~ n a
+    , Entered n m (n a) ~ m a
+    ) => Enter (m a) m n (n a)
+  where
     enter (NT f) = f
 
 -- | Like `lift`.
@@ -65,7 +97,7 @@ logWriterTSNat logger = NT $ \x -> do
     liftIO $ logger w
     return a
 
--- | Like `logWriterTSNat`, but for strict @WriterT@.
+-- | Like `logWriterTSNat`, but for lazy @WriterT@.
 logWriterTLNat :: MonadIO m => (w -> IO ()) -> (LWriter.WriterT w m :~> m)
 logWriterTLNat logger = NT $ \x -> do
     (a, w) <- LWriter.runWriterT x

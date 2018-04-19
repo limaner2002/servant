@@ -1,7 +1,34 @@
-packages:
-  servant/
+packages: servant/
   servant-client/
+  servant-client-core/
   servant-docs/
   servant-foreign/
   servant-server/
   doc/tutorial/
+
+  -- doc/cookbook/*/*.cabal
+
+  -- doc/cookbook/db-postgres-pool
+  -- doc/cookbook/jwt-and-basic-auth
+  -- doc/cookbook/db-sqlite-simple
+  -- doc/cookbook/basic-auth
+  doc/cookbook/https
+  doc/cookbook/structuring-apis
+  doc/cookbook/using-custom-monad
+  doc/cookbook/file-upload
+
+
+allow-newer:
+  servant-js:servant,
+  servant-js:servant-foreign,
+  servant-auth-server:http-types,
+  servant-multipart:lens,
+  servant-multipart:resourcet,
+  servant-multipart:servant,
+  servant-multipart:servant-server,
+  servant-auth-server:servant-server
+
+constraints:
+  -- see https://github.com/haskell-infra/hackage-trustees/issues/119
+  foundation >=0.0.14,
+  memory <0.14.12 || >0.14.12

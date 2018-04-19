@@ -1,12 +1,11 @@
 # Querying an API
 
-While defining handlers that serve an API has a lot to it, querying an API is simpler: we do not care about what happens inside the webserver, we just need to know how to talk to it and get a response back. Except that we usually have to write the querying functions by hand because the structure of the API isn't a first class citizen and can't be inspected to generate a bunch of client-side functions.
+While defining handlers that [serve an API](Server.lhs) has a lot to it, querying an API is simpler: we do not care about what happens inside the webserver, we just need to know how to talk to it and get a response back. That said, we usually have to write the querying functions by hand because the structure of the API isn't a first class citizen and can't be inspected to generate the client-side functions.
 
-**servant** however has a way to inspect APIs, because APIs are just Haskell types and (GHC) Haskell lets us do quite a few things with types. In the same way that we look at an API type to deduce the types the handlers should have, we can inspect the structure of the API to *derive* Haskell functions that take one argument for each occurence of `Capture`, `ReqBody`, `QueryParam`
-and friends. By *derive*, we mean that there's no code generation involved, the functions are defined just by the structure of the API type.
+**servant** however has a way to inspect APIs, because APIs are just Haskell types and (GHC) Haskell lets us do quite a few things with types. In the same way that we look at an API type to deduce the types the handlers should have, we can inspect the structure of the API to *derive* Haskell functions that take one argument for each occurrence of `Capture`, `ReqBody`, `QueryParam`
+and friends (see [the tutorial introduction](ApiType.lhs) for an overview). By *derive*, we mean that there's no code generation involved - the functions are defined just by the structure of the API type.
 
-The source for this tutorial section is a literate haskell file, so first we
-need to have some language extensions and imports:
+The source for this tutorial section is a literate Haskell file, so first we need to have some language extensions and imports:
 
 ``` haskell
 {-# LANGUAGE DataKinds #-}
@@ -65,7 +64,7 @@ type API = "position" :> Capture "x" Int :> Capture "y" Int :> Get '[JSON] Posit
       :<|> "marketing" :> ReqBody '[JSON] ClientInfo :> Post '[JSON] Email
 ```
 
-What we are going to get with **servant-client** here is 3 functions, one to query each endpoint:
+What we are going to get with **servant-client** here is three functions, one to query each endpoint:
 
 ``` haskell
 position :: Int -- ^ value for "x"
@@ -92,7 +91,20 @@ api = Proxy
 position :<|> hello :<|> marketing = client api
 ```
 
-As you can see in the code above, we just "pattern match our way" to these functions. If we try to derive less or more functions than there are endpoints in the API, we obviously get an error. The `BaseUrl` value there is just:
+`client api` returns client functions for our _entire_ API, combined with `:<|>`, which we can pattern match on as above. You could say `client` "calculates" the correct type and number of client functions for the API type it is given (via a `Proxy`), as well as their implementations.
+
+If you have an `EmptyAPI` in your API, servant-client will hand you a value of
+type `EmptyClient` in the corresponding slot, where `data EmptyClient =
+EmptyClient`, as a way to indicate that you can't do anything useful with it.
+
+``` haskell ignore
+type API' = API :<|> EmptyAPI
+
+api' :: Proxy API'
+api' = Proxy
+
+(position' :<|> hello' :<|> marketing') :<|> EmptyClient = client api'
+```
 
 ``` haskell ignore
 -- | URI scheme to use
@@ -116,15 +128,15 @@ That's it. Let's now write some code that uses our client functions.
 ``` haskell
 queries :: ClientM (Position, HelloMessage, Email)
 queries = do
-  pos <- position 10 10 
-  message <- hello (Just "servant") 
+  pos <- position 10 10
+  message <- hello (Just "servant")
   em  <- marketing (ClientInfo "Alp" "alp@foo.com" 26 ["haskell", "mathematics"])
   return (pos, message, em)
 
 run :: IO ()
 run = do
-  manager <- newManager defaultManagerSettings
-  res <- runClientM queries (ClientEnv manager (BaseUrl Http "localhost" 8081 ""))
+  manager' <- newManager defaultManagerSettings
+  res <- runClientM queries (mkClientEnv manager' (BaseUrl Http "localhost" 8081 ""))
   case res of
     Left err -> putStrLn $ "Error: " ++ show err
     Right (pos, message, em) -> do
@@ -135,10 +147,54 @@ run = do
 
 Here's the output of the above code running against the appropriate server:
 
-``` bash
+```
 Position {xCoord = 10, yCoord = 10}
 HelloMessage {msg = "Hello, servant"}
 Email {from = "great@company.com", to = "alp@foo.com", subject = "Hey Alp, we miss you!", body = "Hi Alp,\n\nSince you've recently turned 26, have you checked out our latest haskell, mathematics products? Give us a visit!"}
 ```
 
-The types of the arguments for the functions are the same as for (server-side) request handlers. You now know how to use **servant-client**!
+The types of the arguments for the functions are the same as for (server-side) request handlers.
+
+## Querying Streaming APIs.
+
+Consider the following streaming API type:
+
+``` haskell
+type StreamAPI = "positionStream" :> StreamGet NewlineFraming JSON (ResultStream Position)
+```
+
+Note that when we declared an API to serve, we specified a `StreamGenerator` as a producer of streams. Now we specify our result type as a `ResultStream`. With types that can be used both ways, if appropriate adaptors are written (in the form of `ToStreamGenerator` and `BuildFromStream` instances), then this asymmetry isn't necessary. Otherwise, if you want to share the same API across clients and servers, you can parameterize it like so:
+
+``` haskell ignore
+type StreamAPI f = "positionStream" :> StreamGet NewlineFraming JSON (f Position)
+type ServerStreamAPI = StreamAPI StreamGenerator
+type ClientStreamAPI = StreamAPI ResultStream
+```
+
+In any case, here's how we write a function to query our API:
+
+``` haskell
+streamAPI :: Proxy StreamAPI
+streamAPI = Proxy
+
+posStream :: ClientM (ResultStream Position)
+
+posStream = client streamAPI
+```
+
+And here's how to just print out all elements from a `ResultStream`, to give some idea of how to work with them.
+
+``` haskell
+printResultStream :: Show a => ResultStream a -> IO ()
+printResultStream (ResultStream k) = k $ \getResult ->
+       let loop = do
+            r <- getResult
+            case r of
+                Nothing -> return ()
+                Just x -> print x >> loop
+       in loop
+```
+
+The stream is parsed and provided incrementally. So the above loop prints out each result as soon as it is received on the stream, rather than waiting until they are all available to print them at once.
+
+You now know how to use **servant-client**!

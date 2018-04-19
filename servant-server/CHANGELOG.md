@@ -1,3 +1,43 @@
+[The latest version of this document is on GitHub.](https://github.com/haskell-servant/servant/blob/master/servant-server/CHANGELOG.md)
+[Changelog for `servant` package contains significant entries for all core packages.](https://github.com/haskell-servant/servant/blob/master/servant/CHANGELOG.md)
+
+0.13.0.1
+--------
+
+- Support `base-compat-0.10`
+
+0.13
+----
+
+- Streaming endpoint support.
+  ([#836](https://github.com/haskell-servant/servant/pull/836))
+- *servant* Add `Servant.API.Modifiers`
+  ([#873](https://github.com/haskell-servant/servant/pull/873))
+
+0.12
+----
+
+### Breaking changes
+
+* Added `hoistServer` member to the `HasServer` class, which is `HasServer`
+  specific `enter`.
+  ([#804](https://github.com/haskell-servant/servant/pull/804))
+
+0.11
+----
+
+### Breaking changes
+
+* Changed `HasServer` instances for `Header` to throw 400 when parsing fails
+  ([#724](https://github.com/haskell-servant/servant/pull/724))
+* Added `headersD` block to `Delayed`
+  ([#724](https://github.com/haskell-servant/servant/pull/724))
+
+### Other changes
+
+* Add `err418`, `err422` error codes
+  ([#739](https://github.com/haskell-servant/servant/pull/739))
+
 0.10
 ----
 
@@ -12,7 +52,7 @@
 
 ### Other changes
 
-* Added `paramD` block to `Delayed`
+* Added `paramsD` block to `Delayed`
 
 * Add `err422` Unprocessable Entity
   ([#646](https://github.com/haskell-servant/servant/pull/646))

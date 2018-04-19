@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP                    #-}
 {-# LANGUAGE DataKinds              #-}
+{-# LANGUAGE DeriveDataTypeable     #-}
 {-# LANGUAGE DeriveFunctor          #-}
 {-# LANGUAGE FlexibleContexts       #-}
 {-# LANGUAGE FlexibleInstances      #-}
@@ -23,6 +24,7 @@
 -- example above).
 module Servant.API.ResponseHeaders
     ( Headers(..)
+    , ResponseHeader (..)
     , AddHeader
     , addHeader
     , noHeader
@@ -32,33 +34,40 @@ module Servant.API.ResponseHeaders
     , HList(..)
     ) where
 
-import           Data.ByteString.Char8       as BS (pack, unlines, init)
+import           Data.ByteString.Char8       as BS (ByteString, pack, unlines, init)
+import           Data.Typeable               (Typeable)
 import           Web.HttpApiData             (ToHttpApiData, toHeader,
                                              FromHttpApiData, parseHeader)
 import qualified Data.CaseInsensitive        as CI
 import           Data.Proxy
-import           GHC.TypeLits                (KnownSymbol, symbolVal)
+import           GHC.TypeLits                (KnownSymbol, Symbol, symbolVal)
 import qualified Network.HTTP.Types.Header   as HTTP
 
-import           Servant.API.Header          (Header (..))
+import           Servant.API.Header          (Header)
 import           Prelude                     ()
 import           Prelude.Compat
 
 -- | Response Header objects. You should never need to construct one directly.
--- Instead, use 'addOptionalHeader.
+-- Instead, use 'addOptionalHeader'.
 data Headers ls a = Headers { getResponse :: a
                             -- ^ The underlying value of a 'Headers'
                             , getHeadersHList :: HList ls
                             -- ^ HList of headers.
                             } deriving (Functor)
 
+data ResponseHeader (sym :: Symbol) a
+    = Header a
+    | MissingHeader
+    | UndecodableHeader ByteString
+  deriving (Typeable, Eq, Show, Functor)
+
 data HList a where
     HNil  :: HList '[]
-    HCons :: Header h x -> HList xs -> HList (Header h x ': xs)
+    HCons :: ResponseHeader h x -> HList xs -> HList (Header h x ': xs)
 
 type family HeaderValMap (f :: * -> *) (xs :: [*]) where
     HeaderValMap f '[]                = '[]
-    HeaderValMap f (Header h x ': xs) = Header h (f x) ': (HeaderValMap f xs)
+    HeaderValMap f (Header h x ': xs) = Header h (f x) ': HeaderValMap f xs
 
 
 class BuildHeadersTo hs where
@@ -71,7 +80,7 @@ instance OVERLAPPING_ BuildHeadersTo '[] where
     buildHeadersTo _ = HNil
 
 instance OVERLAPPABLE_ ( FromHttpApiData v, BuildHeadersTo xs, KnownSymbol h )
-         => BuildHeadersTo ((Header h v) ': xs) where
+         => BuildHeadersTo (Header h v ': xs) where
     buildHeadersTo headers =
       let wantedHeader = CI.mk . pack $ symbolVal (Proxy :: Proxy h)
           matching = snd <$> filter (\(h, _) -> h == wantedHeader) headers
@@ -110,7 +119,7 @@ instance OVERLAPPABLE_ ( KnownSymbol h, GetHeaders (HList rest), ToHttpApiData v
 -- We need all these fundeps to save type inference
 class AddHeader h v orig new
     | h v orig -> new, new -> h, new -> v, new -> orig where
-  addOptionalHeader :: Header h v -> orig -> new  -- ^ N.B.: The same header can't be added multiple times
+  addOptionalHeader :: ResponseHeader h v -> orig -> new  -- ^ N.B.: The same header can't be added multiple times
 
 
 instance OVERLAPPING_ ( KnownSymbol h, ToHttpApiData v )
@@ -125,7 +134,7 @@ instance OVERLAPPABLE_ ( KnownSymbol h, ToHttpApiData v
 -- | @addHeader@ adds a header to a response. Note that it changes the type of
 -- the value in the following ways:
 --
---   1. A simple value is wrapped in "Headers [<hdr>]":
+--   1. A simple value is wrapped in "Headers '[hdr]":
 --
 -- >>> let example1 = addHeader 5 "hi" :: Headers '[Header "someheader" Int] String;
 -- >>> getHeaders example1

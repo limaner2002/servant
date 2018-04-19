@@ -69,6 +69,7 @@ import Servant.Server                   (BasicAuthCheck (BasicAuthCheck),
 import Servant.Server.Experimental.Auth (AuthHandler, AuthServerData,
                                          mkAuthHandler)
 import Servant.Server.Experimental.Auth()
+import Web.Cookie                       (parseCookies)
 
 -- | private data that needs protection
 newtype PrivateData = PrivateData { ssshhh :: Text }
@@ -245,25 +246,28 @@ your feedback!
 
 ### What is Generalized Authentication?
 
-**TL;DR**: you throw a tagged `AuthProtect` combinator in front of the endpoints
-you want protected and then supply a function `Request -> Handler user`
-which we run anytime a request matches a protected endpoint. It precisely solves
-the "I just need to protect these endpoints with a function that does some
-complicated business logic" and nothing more. Behind the scenes we use a type
-family instance (`AuthServerData`) and `Context` to accomplish this.
+**TL;DR**: you throw a tagged `AuthProtect` combinator in front of the
+endpoints you want protected and then supply a function `Request -> Handler a`,
+where `a` is the type of your choice representing the data returned by
+successful authentication - e.g., a `User` or, in our example below, `Account`.
+This function is run anytime a request matches a protected endpoint. It
+precisely solves the "I just need to protect these endpoints with a function
+that does some complicated business logic" and nothing more. Behind the scenes
+we use a type family instance (`AuthServerData`) and `Context` to accomplish
+this.
 
 ### Generalized Authentication in Action
 
 Let's implement a trivial authentication scheme. We will protect our API by
 looking for a cookie named `"servant-auth-cookie"`. This cookie's value will
-contain a key from which we can lookup a `User`.
+contain a key from which we can lookup a `Account`.
 
 ```haskell
--- | A user type that we "fetch from the database" after
+-- | An account type that we "fetch from the database" after
 -- performing authentication
 newtype Account = Account { unAccount :: Text }
 
--- | A (pure) database mapping keys to users.
+-- | A (pure) database mapping keys to accounts.
 database :: Map ByteString Account
 database = fromList [ ("key1", Account "Anne Briggs")
                     , ("key2", Account "Bruce Cockburn")
@@ -279,19 +283,24 @@ lookupAccount key = case Map.lookup key database of
 ```
 
 For generalized authentication, servant exposes the `AuthHandler` type,
-which is used to wrap the `Request -> Handler user` logic. Let's
+which is used to wrap the `Request -> Handler Account` logic. Let's
 create a value of type `AuthHandler Request Account` using the above `lookupAccount`
-method:
+method (note: we depend upon [`cookie`](https://hackage.haskell.org/package/cookie)'s
+`parseCookies` for this):
 
 ```haskell
--- | The auth handler wraps a function from Request -> Handler Account
--- we look for a Cookie and pass the value of the cookie to `lookupAccount`.
+
+--- | The auth handler wraps a function from Request -> Handler Account.
+--- We look for a token in the request headers that we expect to be in the cookie.
+--- The token is then passed to our `lookupAccount` function.
 authHandler :: AuthHandler Request Account
-authHandler =
-  let handler req = case lookup "servant-auth-cookie" (requestHeaders req) of
-        Nothing -> throwError (err401 { errBody = "Missing auth header" })
-        Just authCookieKey -> lookupAccount authCookieKey
-  in mkAuthHandler handler
+authHandler = mkAuthHandler handler
+  where
+  maybeToEither e = maybe (Left e) Right
+  throw401 msg = throwError $ err401 { errBody = msg }
+  handler req = either throw401 lookupAccount $ do
+    cookie <- maybeToEither "Missing cookie header" $ lookup "cookie" $ requestHeaders req
+    maybeToEither "Missing token in cookie" $ lookup "servant-auth-cookie" $ parseCookies cookie
 ```
 
 Let's now protect our API with our new, bespoke authentication scheme. We'll
@@ -377,13 +386,13 @@ forward:
 
 1. use the `AuthProtect` combinator to protect your API.
 2. choose a application-specific data type used by your server when
-authentication is successful (in our case this was `User`).
-3. Create a value of `AuthHandler Request User` which encapsulates the
-authentication logic (`Request -> Handler User`). This function
+authentication is successful (in our case this was `Account`).
+3. Create a value of `AuthHandler Request Account` which encapsulates the
+authentication logic (`Request -> Handler Account`). This function
 will be executed everytime a request matches a protected route.
 4. Provide an instance of the `AuthServerData` type family, specifying your
 application-specific data type returned when authentication is successful (in
-our case this was `User`).
+our case this was `Account`).
 
 Caveats:
 

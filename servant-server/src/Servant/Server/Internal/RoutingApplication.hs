@@ -3,12 +3,8 @@
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GADTs                      #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE KindSignatures             #-}
 {-# LANGUAGE MultiParamTypeClasses      #-}
-{-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE RecordWildCards            #-}
-{-# LANGUAGE StandaloneDeriving         #-}
-{-# LANGUAGE TupleSections              #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeOperators              #-}
 {-# LANGUAGE UndecidableInstances       #-}
@@ -17,11 +13,11 @@ module Servant.Server.Internal.RoutingApplication where
 import           Control.Monad                      (ap, liftM)
 import           Control.Monad.Base                 (MonadBase (..))
 import           Control.Monad.Catch                (MonadThrow (..))
-import           Control.Monad.Reader               (MonadReader (..), ReaderT, runReaderT)
+import           Control.Monad.Reader               (MonadReader (..), ReaderT (..), runReaderT)
 import           Control.Monad.Trans                (MonadIO (..), MonadTrans (..))
 import           Control.Monad.Trans.Control        (ComposeSt, MonadBaseControl (..), MonadTransControl (..),
                                                      defaultLiftBaseWith, defaultRestoreM)
-import           Control.Monad.Trans.Resource       (MonadResource (..), ResourceT, runResourceT, transResourceT)
+import           Control.Monad.Trans.Resource       (MonadResource (..), ResourceT, runResourceT, transResourceT, withInternalState, runInternalState)
 import           Network.Wai                        (Application, Request, Response, ResponseReceived)
 import           Prelude                            ()
 import           Prelude.Compat
@@ -82,12 +78,11 @@ instance MonadBaseControl b m => MonadBaseControl b (RouteResultT m) where
 
 instance MonadTransControl RouteResultT where
     type StT RouteResultT a = RouteResult a
-    liftWith f = RouteResultT $ liftM return $ f $ runRouteResultT
+    liftWith f = RouteResultT $ liftM return $ f runRouteResultT
     restoreT = RouteResultT
 
 instance MonadThrow m => MonadThrow (RouteResultT m) where
     throwM = lift . throwM
-
 
 toApplication :: RoutingApplication -> Application
 toApplication ra request respond = ra request routingRespond
@@ -160,7 +155,9 @@ toApplication ra request respond = ra request routingRespond
 -- 5. Query parameter checks. They require parsing and can cause 400 if the
 -- parsing fails. Query parameter checks provide inputs to the handler
 --
--- 6. Body check. The request body check can cause 400.
+-- 6. Header Checks. They also require parsing and can cause 400 if parsing fails.
+--
+-- 7. Body check. The request body check can cause 400.
 --
 data Delayed env c where
   Delayed :: { capturesD :: env -> DelayedIO captures
@@ -169,9 +166,11 @@ data Delayed env c where
              , acceptD   :: DelayedIO ()
              , contentD  :: DelayedIO contentType
              , paramsD   :: DelayedIO params
+             , headersD  :: DelayedIO headers
              , bodyD     :: contentType -> DelayedIO body
              , serverD   :: captures
                          -> params
+                         -> headers
                          -> auth
                          -> body
                          -> Request
@@ -181,7 +180,7 @@ data Delayed env c where
 instance Functor (Delayed env) where
   fmap f Delayed{..} =
     Delayed
-      { serverD = \ c p a b req -> f <$> serverD c p a b req
+      { serverD = \ c p h a b req -> f <$> serverD c p h a b req
       , ..
       } -- Note [Existential Record Update]
 
@@ -194,18 +193,27 @@ newtype DelayedIO a = DelayedIO { runDelayedIO' :: ReaderT Request (ResourceT (R
   deriving
     ( Functor, Applicative, Monad
     , MonadIO, MonadReader Request
-    , MonadBase IO
     , MonadThrow
     , MonadResource
     )
+
+instance MonadBase IO DelayedIO where
+    liftBase = liftIO
 
 liftRouteResult :: RouteResult a -> DelayedIO a
 liftRouteResult x = DelayedIO $ lift . lift $ RouteResultT . return $ x
 
 instance MonadBaseControl IO DelayedIO where
-    type StM DelayedIO a = StM (ReaderT Request (ResourceT (RouteResultT IO))) a
-    liftBaseWith f = DelayedIO $ liftBaseWith $ \g -> f (g . runDelayedIO')
-    restoreM       = DelayedIO . restoreM
+    -- type StM DelayedIO a = StM (ReaderT Request (ResourceT (RouteResultT IO))) a
+    -- liftBaseWith f = DelayedIO $ liftBaseWith $ \g -> f (g . runDelayedIO')
+    -- restoreM       = DelayedIO . restoreM
+
+    type StM DelayedIO a = RouteResult a
+    liftBaseWith f = DelayedIO $ ReaderT $ \req -> withInternalState $ \s ->
+        liftBaseWith $ \runInBase -> f $ \x ->
+            runInBase (runInternalState (runReaderT (runDelayedIO' x) req) s)
+    restoreM      = DelayedIO . lift . withInternalState . const . restoreM
+
 
 runDelayedIO :: DelayedIO a -> Request -> ResourceT IO (RouteResult a)
 runDelayedIO m req = transResourceT runRouteResultT $ runReaderT (runDelayedIO' m) req
@@ -213,7 +221,7 @@ runDelayedIO m req = transResourceT runRouteResultT $ runReaderT (runDelayedIO' 
 -- | A 'Delayed' without any stored checks.
 emptyDelayed :: RouteResult a -> Delayed env a
 emptyDelayed result =
-  Delayed (const r) r r r r r (const r) (\ _ _ _ _ _ -> result)
+  Delayed (const r) r r r r r r (const r) (\ _ _ _ _ _ _ -> result)
   where
     r = return ()
 
@@ -238,7 +246,7 @@ addCapture :: Delayed env (a -> b)
 addCapture Delayed{..} new =
   Delayed
     { capturesD = \ (txt, env) -> (,) <$> capturesD env <*> new txt
-    , serverD   = \ (x, v) p a b req -> ($ v) <$> serverD x p a b req
+    , serverD   = \ (x, v) p h a b req -> ($ v) <$> serverD x p h a b req
     , ..
     } -- Note [Existential Record Update]
 
@@ -249,7 +257,18 @@ addParameterCheck :: Delayed env (a -> b)
 addParameterCheck Delayed {..} new =
   Delayed
     { paramsD = (,) <$> paramsD <*> new
-    , serverD = \c (p, pNew) a b req -> ($ pNew) <$> serverD c p a b req
+    , serverD = \c (p, pNew) h a b req -> ($ pNew) <$> serverD c p h a b req
+    , ..
+    }
+
+-- | Add a parameter check to the end of the params block
+addHeaderCheck :: Delayed env (a -> b)
+               -> DelayedIO a
+               -> Delayed env b
+addHeaderCheck Delayed {..} new =
+  Delayed
+    { headersD = (,) <$> headersD <*> new
+    , serverD = \c p (h, hNew) a b req -> ($ hNew) <$> serverD c p h a b req
     , ..
     }
 
@@ -270,7 +289,7 @@ addAuthCheck :: Delayed env (a -> b)
 addAuthCheck Delayed{..} new =
   Delayed
     { authD   = (,) <$> authD <*> new
-    , serverD = \ c p (y, v) b req -> ($ v) <$> serverD c p y b req
+    , serverD = \ c p h (y, v) b req -> ($ v) <$> serverD c p h y b req
     , ..
     } -- Note [Existential Record Update]
 
@@ -286,7 +305,7 @@ addBodyCheck Delayed{..} newContentD newBodyD =
   Delayed
     { contentD = (,) <$> contentD <*> newContentD
     , bodyD    = \(content, c) -> (,) <$> bodyD content <*> newBodyD c
-    , serverD  = \ c p a (z, v) req -> ($ v) <$> serverD c p a z req
+    , serverD  = \ c p h a (z, v) req -> ($ v) <$> serverD c p h a z req
     , ..
     } -- Note [Existential Record Update]
 
@@ -316,7 +335,7 @@ addAcceptCheck Delayed{..} new =
 passToServer :: Delayed env (a -> b) -> (Request -> a) -> Delayed env b
 passToServer Delayed{..} x =
   Delayed
-    { serverD = \ c p a b req -> ($ x req) <$> serverD c p a b req
+    { serverD = \ c p h a b req -> ($ x req) <$> serverD c p h a b req
     , ..
     } -- Note [Existential Record Update]
 
@@ -338,8 +357,9 @@ runDelayed Delayed{..} env = runDelayedIO $ do
     acceptD
     content <- contentD
     p <- paramsD       -- Has to be before body parsing, but after content-type checks
+    h <- headersD
     b <- bodyD content
-    liftRouteResult (serverD c p a b r)
+    liftRouteResult (serverD c p h a b r)
 
 -- | Runs a delayed server and the resulting action.
 -- Takes a continuation that lets us send a response.
@@ -351,7 +371,7 @@ runAction :: Delayed env (Handler a)
           -> (RouteResult Response -> IO r)
           -> (a -> RouteResult Response)
           -> IO r
-runAction action env req respond k = runResourceT $ do
+runAction action env req respond k = runResourceT $
     runDelayed action env req >>= go >>= liftIO . respond
   where
     go (Fail e)      = return $ Fail e

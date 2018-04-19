@@ -3,13 +3,17 @@
 {-# LANGUAGE DeriveGeneric        #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
-{-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE OverloadedStrings    #-}
 {-# LANGUAGE PolyKinds            #-}
 {-# LANGUAGE ScopedTypeVariables  #-}
 {-# LANGUAGE TypeFamilies         #-}
 {-# LANGUAGE TypeOperators        #-}
 {-# LANGUAGE TypeSynonymInstances #-}
+#if __GLASGOW_HASKELL__ >= 800
+{-# OPTIONS_GHC -freduction-depth=100 #-}
+#else
+{-# OPTIONS_GHC -fcontext-stack=100 #-}
+#endif
 
 module Servant.ServerSpec where
 
@@ -28,7 +32,7 @@ import           Network.HTTP.Types         (Status (..), hAccept, hContentType,
                                              methodDelete, methodGet,
                                              methodHead, methodPatch,
                                              methodPost, methodPut, ok200,
-                                             imATeaPot418,
+                                             imATeapot418,
                                              parseQuery)
 import           Network.Wai                (Application, Request, requestHeaders, pathInfo,
                                              queryString, rawQueryString,
@@ -38,18 +42,18 @@ import           Network.Wai.Test           (defaultRequest, request,
                                              simpleHeaders, simpleStatus)
 import           Servant.API                ((:<|>) (..), (:>), AuthProtect,
                                              BasicAuth, BasicAuthData(BasicAuthData),
-                                             Capture, CaptureAll, Delete, Get, Header (..),
+                                             Capture, CaptureAll, Delete, Get, Header,
                                              Headers, HttpVersion,
                                              IsSecure (..), JSON,
                                              NoContent (..), Patch, PlainText,
-                                             Post, Put,
+                                             Post, Put, EmptyAPI,
                                              QueryFlag, QueryParam, QueryParams,
                                              Raw, RemoteHost, ReqBody,
                                              StdMethod (..), Verb, addHeader)
 import           Servant.API.Internal.Test.ComprehensiveAPI
-import           Servant.Server             (Server, Handler, err401, err403,
+import           Servant.Server             (Server, Handler, Tagged (..), err401, err403,
                                              err404, serve, serveWithContext,
-                                             Context((:.), EmptyContext))
+                                             Context((:.), EmptyContext), emptyServer)
 import           Test.Hspec                 (Spec, context, describe, it,
                                              shouldBe, shouldContain)
 import qualified Test.Hspec.Wai             as THW
@@ -210,7 +214,7 @@ captureSpec = do
 
     with (return (serve
         (Proxy :: Proxy (Capture "captured" String :> Raw))
-        (\ "captured" request_ respond ->
+        (\ "captured" -> Tagged $ \request_ respond ->
             respond $ responseLBS ok200 [] (cs $ show $ pathInfo request_)))) $ do
       it "strips the captured path snippet from pathInfo" $ do
         get "/captured/foo" `shouldRespondWith` (fromString (show ["foo" :: String]))
@@ -262,7 +266,7 @@ captureAllSpec = do
 
     with (return (serve
         (Proxy :: Proxy (CaptureAll "segments" String :> Raw))
-        (\ _captured request_ respond ->
+        (\ _captured -> Tagged $ \request_ respond ->
             respond $ responseLBS ok200 [] (cs $ show $ pathInfo request_)))) $ do
       it "consumes everything from pathInfo" $ do
         get "/captured/foo/bar/baz" `shouldRespondWith` (fromString (show ([] :: [Int])))
@@ -447,8 +451,8 @@ reqBodySpec = describe "Servant.API.ReqBody" $ do
 ------------------------------------------------------------------------------
 
 type HeaderApi a = Header "MyHeader" a :> Delete '[JSON] NoContent
-headerApi :: Proxy (HeaderApi a)
-headerApi = Proxy
+headerApi :: Proxy a -> Proxy (HeaderApi a)
+headerApi _ = Proxy
 
 headerSpec :: Spec
 headerSpec = describe "Servant.API.Header" $ do
@@ -465,17 +469,24 @@ headerSpec = describe "Servant.API.Header" $ do
           return NoContent
         expectsString Nothing  = error "Expected a string"
 
-    with (return (serve headerApi expectsInt)) $ do
+    with (return (serve (headerApi (Proxy :: Proxy Int)) expectsInt)) $ do
         let delete' x = THW.request methodDelete x [("MyHeader", "5")]
 
         it "passes the header to the handler (Int)" $
             delete' "/" "" `shouldRespondWith` 200
 
-    with (return (serve headerApi expectsString)) $ do
+    with (return (serve (headerApi (Proxy :: Proxy String)) expectsString)) $ do
         let delete' x = THW.request methodDelete x [("MyHeader", "more from you")]
 
         it "passes the header to the handler (String)" $
             delete' "/" "" `shouldRespondWith` 200
+
+    with (return (serve (headerApi (Proxy :: Proxy Int)) expectsInt)) $ do
+        let delete' x = THW.request methodDelete x [("MyHeader", "not a number")]
+
+        it "checks for parse errors" $
+            delete' "/" "" `shouldRespondWith` 400
+
 
 -- }}}
 ------------------------------------------------------------------------------
@@ -487,9 +498,10 @@ type RawApi = "foo" :> Raw
 rawApi :: Proxy RawApi
 rawApi = Proxy
 
-rawApplication :: Show a => (Request -> a) -> Application
-rawApplication f request_ respond = respond $ responseLBS ok200 []
-    (cs $ show $ f request_)
+rawApplication :: Show a => (Request -> a) -> Tagged m Application
+rawApplication f = Tagged $ \request_ respond ->
+    respond $ responseLBS ok200 []
+        (cs $ show $ f request_)
 
 rawSpec :: Spec
 rawSpec = do
@@ -601,6 +613,7 @@ type MiscCombinatorsAPI
   =    "version" :> HttpVersion :> Get '[JSON] String
   :<|> "secure"  :> IsSecure :> Get '[JSON] String
   :<|> "host"    :> RemoteHost :> Get '[JSON] String
+  :<|> "empty"   :> EmptyAPI
 
 miscApi :: Proxy MiscCombinatorsAPI
 miscApi = Proxy
@@ -609,6 +622,7 @@ miscServ :: Server MiscCombinatorsAPI
 miscServ = versionHandler
       :<|> secureHandler
       :<|> hostHandler
+      :<|> emptyServer
 
   where versionHandler = return . show
         secureHandler Secure = return "secure"
@@ -627,6 +641,9 @@ miscCombinatorSpec = with (return $ serve miscApi miscServ) $
     it "Checks that hspec-wai issues request from 0.0.0.0" $
       go "/host" "\"0.0.0.0:0\""
 
+    it "Doesn't serve anything from the empty API" $
+      Test.Hspec.Wai.get "empty" `shouldRespondWith` 404
+
   where go path res = Test.Hspec.Wai.get path `shouldRespondWith` res
 
 -- }}}
@@ -644,7 +661,7 @@ basicAuthApi = Proxy
 basicAuthServer :: Server BasicAuthAPI
 basicAuthServer =
   const (return jerry) :<|>
-  (\ _ respond -> respond $ responseLBS imATeaPot418 [] "")
+  (Tagged $ \ _ respond -> respond $ responseLBS imATeapot418 [] "")
 
 basicAuthContext :: Context '[ BasicAuthCheck () ]
 basicAuthContext =
@@ -689,7 +706,7 @@ genAuthApi = Proxy
 
 genAuthServer :: Server GenAuthAPI
 genAuthServer = const (return tweety)
-           :<|> (\ _ respond -> respond $ responseLBS imATeaPot418 [] "")
+           :<|> (Tagged $ \ _ respond -> respond $ responseLBS imATeapot418 [] "")
 
 type instance AuthServerData (AuthProtect "auth") = ()
 

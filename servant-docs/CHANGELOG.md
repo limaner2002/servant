@@ -1,3 +1,32 @@
+[The latest version of this document is on GitHub.](https://github.com/haskell-servant/servant/blob/master/servant-docs/CHANGELOG.md)
+[Changelog for `servant` package contains significant entries for all core packages.](https://github.com/haskell-servant/servant/blob/master/servant/CHANGELOG.md)
+
+0.11.2
+------
+
+* Allow `servant-0.13`:
+  - Doesn't have instances for streaming.
+  - Servant.API.Modifiers extra information isn't used.
+
+0.11.1
+------
+
+* Export `DocAuthentication` and related lenses.
+* Make `defAction`'s documentation visible in Haddock documentation.
+* Add a markdown header for the Headers an endpoint is sensitive to.
+* Document the HTTP Method the parameters of an endpoint belong to
+  (rather than assuming `GET` for all of them).
+* Content type of sample response body is also displayed.
+* Can now customise various aspects of how the document is produced
+  using `markdownWith` and `RenderingOptions`:
+    - How many content-types for each example are shown
+    - Whether notes should be grouped together under their own header.
+
+0.11
+----
+
+* changed the type of `rqbody`.
+
 0.10
 ----
 

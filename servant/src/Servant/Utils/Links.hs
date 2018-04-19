@@ -1,11 +1,13 @@
 {-# LANGUAGE ConstraintKinds        #-}
 {-# LANGUAGE DataKinds              #-}
+{-# LANGUAGE FlexibleContexts       #-}
 {-# LANGUAGE FlexibleInstances      #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE PolyKinds              #-}
 {-# LANGUAGE ScopedTypeVariables    #-}
 {-# LANGUAGE TypeFamilies           #-}
 {-# LANGUAGE TypeOperators          #-}
+{-# LANGUAGE UndecidableInstances   #-}
 {-# OPTIONS_HADDOCK not-home        #-}
 
 -- | Type safe generation of internal links.
@@ -84,42 +86,79 @@ module Servant.Utils.Links (
   --
   -- | Note that 'URI' is from the "Network.URI" module in the @network-uri@ package.
     safeLink
+  , allLinks
   , URI(..)
   -- * Adding custom types
   , HasLink(..)
-  , linkURI
   , Link
+  , linkURI
+  , linkURI'
+  , LinkArrayElementStyle (..)
+  -- ** Link accessors
+  , Param (..)
+  , linkSegments
+  , linkQueryParams
 ) where
 
 import           Data.List
-import           Data.Monoid.Compat    ( (<>) )
+import           Data.Semigroup        ((<>))
 import           Data.Proxy            ( Proxy(..) )
+import           Data.Singletons.Bool  ( SBool (..), SBoolI (..) )
 import qualified Data.Text             as Text
 import qualified Data.Text.Encoding    as TE
+import           Data.Type.Bool        (If)
 import           GHC.TypeLits          ( KnownSymbol, symbolVal )
 import           Network.URI           ( URI(..), escapeURIString, isUnreserved )
 import           Prelude               ()
 import           Prelude.Compat
 
 import Web.HttpApiData
+import Servant.API.Alternative ( (:<|>)((:<|>)) )
 import Servant.API.BasicAuth ( BasicAuth )
-import Servant.API.Capture ( Capture, CaptureAll )
-import Servant.API.ReqBody ( ReqBody )
-import Servant.API.QueryParam ( QueryParam, QueryParams, QueryFlag )
-import Servant.API.Header ( Header )
+import Servant.API.Capture ( Capture', CaptureAll )
+import Servant.API.ReqBody ( ReqBody' )
+import Servant.API.QueryParam ( QueryParam', QueryParams, QueryFlag )
+import Servant.API.Header ( Header' )
+import Servant.API.HttpVersion (HttpVersion)
 import Servant.API.RemoteHost ( RemoteHost )
+import Servant.API.IsSecure (IsSecure)
+import Servant.API.Empty (EmptyAPI (..))
 import Servant.API.Verbs ( Verb )
 import Servant.API.Sub ( type (:>) )
 import Servant.API.Raw ( Raw )
+import Servant.API.Stream ( Stream )
 import Servant.API.TypeLevel
+import Servant.API.Modifiers (FoldRequired)
+import Servant.API.Description (Description, Summary)
+import Servant.API.Vault (Vault)
+import Servant.API.WithNamedContext (WithNamedContext)
+import Servant.API.Experimental.Auth ( AuthProtect )
 
 -- | A safe link datatype.
 -- The only way of constructing a 'Link' is using 'safeLink', which means any
 -- 'Link' is guaranteed to be part of the mentioned API.
 data Link = Link
-  { _segments :: [String] -- ^ Segments of "foo/bar" would be ["foo", "bar"]
-  , _queryParams :: [Param Query]
+  { _segments    :: [Escaped]
+  , _queryParams :: [Param]
   } deriving Show
+
+newtype Escaped = Escaped String
+
+escaped :: String -> Escaped
+escaped = Escaped . escapeURIString isUnreserved
+
+getEscaped :: Escaped -> String
+getEscaped (Escaped s) = s
+
+instance Show Escaped where
+    showsPrec d (Escaped s) = showsPrec d s
+    show (Escaped s)        = show s
+
+linkSegments :: Link -> [String]
+linkSegments = map getEscaped . _segments
+
+linkQueryParams :: Link -> [Param]
+linkQueryParams = _queryParams
 
 instance ToHttpApiData Link where
     toHeader   = TE.encodeUtf8 . toUrlPiece
@@ -127,39 +166,80 @@ instance ToHttpApiData Link where
         let uri = linkURI l
         in Text.pack $ uriPath uri ++ uriQuery uri
 
--- Phantom types for Param
-data Query
-
--- | Query param
-data Param a
+-- | Query parameter.
+data Param
     = SingleParam    String Text.Text
     | ArrayElemParam String Text.Text
     | FlagParam      String
   deriving Show
 
-addSegment :: String -> Link -> Link
+addSegment :: Escaped -> Link -> Link
 addSegment seg l = l { _segments = _segments l <> [seg] }
 
-addQueryParam :: Param Query -> Link -> Link
+addQueryParam :: Param -> Link -> Link
 addQueryParam qp l =
     l { _queryParams = _queryParams l <> [qp] }
 
+-- | Transform 'Link' into 'URI'.
+--
+-- >>> type API = "something" :> Get '[JSON] Int
+-- >>> linkURI $ safeLink (Proxy :: Proxy API) (Proxy :: Proxy API)
+-- something
+--
+-- >>> type API = "sum" :> QueryParams "x" Int :> Get '[JSON] Int
+-- >>> linkURI $ safeLink (Proxy :: Proxy API) (Proxy :: Proxy API) [1, 2, 3]
+-- sum?x[]=1&x[]=2&x[]=3
+--
+-- >>> type API = "foo/bar" :> Get '[JSON] Int
+-- >>> linkURI $ safeLink (Proxy :: Proxy API) (Proxy :: Proxy API)
+-- foo%2Fbar
+--
+-- >>> type SomeRoute = "abc" :> Capture "email" String :> Put '[JSON] ()
+-- >>> let someRoute = Proxy :: Proxy SomeRoute
+-- >>> safeLink someRoute someRoute "test@example.com"
+-- Link {_segments = ["abc","test%40example.com"], _queryParams = []}
+--
+-- >>> linkURI $ safeLink someRoute someRoute "test@example.com"
+-- abc/test%40example.com
+--
 linkURI :: Link -> URI
-linkURI (Link segments q_params) =
+linkURI = linkURI' LinkArrayElementBracket
+
+-- | How to encode array query elements.
+data LinkArrayElementStyle
+    = LinkArrayElementBracket  -- ^ @foo[]=1&foo[]=2@
+    | LinkArrayElementPlain    -- ^ @foo=1&foo=2@
+  deriving (Eq, Ord, Show, Enum, Bounded)
+
+-- | Configurable 'linkURI'.
+--
+-- >>> type API = "sum" :> QueryParams "x" Int :> Get '[JSON] Int
+-- >>> linkURI' LinkArrayElementBracket $ safeLink (Proxy :: Proxy API) (Proxy :: Proxy API) [1, 2, 3]
+-- sum?x[]=1&x[]=2&x[]=3
+--
+-- >>> linkURI' LinkArrayElementPlain $ safeLink (Proxy :: Proxy API) (Proxy :: Proxy API) [1, 2, 3]
+-- sum?x=1&x=2&x=3
+--
+linkURI' :: LinkArrayElementStyle -> Link -> URI
+linkURI' addBrackets (Link segments q_params) =
     URI mempty  -- No scheme (relative)
         Nothing -- Or authority (relative)
-        (intercalate "/" segments)
+        (intercalate "/" $ map getEscaped segments)
         (makeQueries q_params) mempty
   where
-    makeQueries :: [Param Query] -> String
+    makeQueries :: [Param] -> String
     makeQueries [] = ""
     makeQueries xs =
         "?" <> intercalate "&" (fmap makeQuery xs)
 
-    makeQuery :: Param Query -> String
-    makeQuery (ArrayElemParam k v) = escape k <> "[]=" <> escape (Text.unpack v)
+    makeQuery :: Param -> String
+    makeQuery (ArrayElemParam k v) = escape k <> style <> escape (Text.unpack v)
     makeQuery (SingleParam k v)    = escape k <> "=" <> escape (Text.unpack v)
     makeQuery (FlagParam k)        = escape k
+
+    style = case addBrackets of
+        LinkArrayElementBracket -> "[]="
+        LinkArrayElementPlain -> "="
 
 escape :: String -> String
 escape = escapeURIString isUnreserved
@@ -174,6 +254,30 @@ safeLink
     -> MkLink endpoint
 safeLink _ endpoint = toLink endpoint (Link mempty mempty)
 
+-- | Create all links in an API.
+--
+-- Note that the @api@ type must be restricted to the endpoints that have
+-- valid links to them.
+--
+-- >>> type API = "foo" :> Capture "name" Text :> Get '[JSON] Text :<|> "bar" :> Capture "name" Int :> Get '[JSON] Double
+-- >>> let fooLink :<|> barLink = allLinks (Proxy :: Proxy API)
+-- >>> :t fooLink
+-- fooLink :: Text -> Link
+-- >>> :t barLink
+-- barLink :: Int -> Link
+--
+-- Note: nested APIs don't work well with this approach
+--
+-- >>> :kind! MkLink (Capture "nest" Char :> (Capture "x" Int :> Get '[JSON] Int :<|> Capture "y" Double :> Get '[JSON] Double))
+-- MkLink (Capture "nest" Char :> (Capture "x" Int :> Get '[JSON] Int :<|> Capture "y" Double :> Get '[JSON] Double)) :: *
+-- = Char -> (Int -> Link) :<|> (Double -> Link)
+--
+allLinks
+    :: forall api. HasLink api
+    => Proxy api
+    -> MkLink api
+allLinks api = toLink api (Link mempty mempty)
+
 -- | Construct a toLink for an endpoint.
 class HasLink endpoint where
     type MkLink endpoint
@@ -185,18 +289,19 @@ class HasLink endpoint where
 instance (KnownSymbol sym, HasLink sub) => HasLink (sym :> sub) where
     type MkLink (sym :> sub) = MkLink sub
     toLink _ =
-        toLink (Proxy :: Proxy sub) . addSegment seg
+        toLink (Proxy :: Proxy sub) . addSegment (escaped seg)
       where
         seg = symbolVal (Proxy :: Proxy sym)
 
-
 -- QueryParam instances
-instance (KnownSymbol sym, ToHttpApiData v, HasLink sub)
-    => HasLink (QueryParam sym v :> sub) where
-    type MkLink (QueryParam sym v :> sub) = Maybe v -> MkLink sub
+instance (KnownSymbol sym, ToHttpApiData v, HasLink sub, SBoolI (FoldRequired mods))
+    => HasLink (QueryParam' mods sym v :> sub) where
+    type MkLink (QueryParam' mods sym v :> sub) = If (FoldRequired mods) v (Maybe v) -> MkLink sub
     toLink _ l mv =
         toLink (Proxy :: Proxy sub) $
-            maybe id (addQueryParam . SingleParam k . toQueryParam) mv l
+            case sbool :: SBool (FoldRequired mods) of
+                STrue  -> (addQueryParam . SingleParam k . toQueryParam) mv l
+                SFalse -> maybe id (addQueryParam . SingleParam k . toQueryParam) mv l
       where
         k :: String
         k = symbolVal (Proxy :: Proxy sym)
@@ -220,27 +325,56 @@ instance (KnownSymbol sym, HasLink sub)
       where
         k = symbolVal (Proxy :: Proxy sym)
 
+-- :<|> instance - Generate all links at once
+instance (HasLink a, HasLink b) => HasLink (a :<|> b) where
+  type MkLink (a :<|> b) = MkLink a :<|> MkLink b
+  toLink _ l = toLink (Proxy :: Proxy a) l :<|> toLink (Proxy :: Proxy b) l
+
 -- Misc instances
-instance HasLink sub => HasLink (ReqBody ct a :> sub) where
-    type MkLink (ReqBody ct a :> sub) = MkLink sub
+instance HasLink sub => HasLink (ReqBody' mods ct a :> sub) where
+    type MkLink (ReqBody' mods ct a :> sub) = MkLink sub
     toLink _ = toLink (Proxy :: Proxy sub)
 
 instance (ToHttpApiData v, HasLink sub)
-    => HasLink (Capture sym v :> sub) where
-    type MkLink (Capture sym v :> sub) = v -> MkLink sub
+    => HasLink (Capture' mods sym v :> sub) where
+    type MkLink (Capture' mods sym v :> sub) = v -> MkLink sub
     toLink _ l v =
         toLink (Proxy :: Proxy sub) $
-            addSegment (escape . Text.unpack $ toUrlPiece v) l
+            addSegment (escaped . Text.unpack $ toUrlPiece v) l
 
 instance (ToHttpApiData v, HasLink sub)
     => HasLink (CaptureAll sym v :> sub) where
     type MkLink (CaptureAll sym v :> sub) = [v] -> MkLink sub
     toLink _ l vs =
         toLink (Proxy :: Proxy sub) $
-            foldl' (flip $ addSegment . escape . Text.unpack . toUrlPiece) l vs
+            foldl' (flip $ addSegment . escaped . Text.unpack . toUrlPiece) l vs
 
-instance HasLink sub => HasLink (Header sym a :> sub) where
-    type MkLink (Header sym a :> sub) = MkLink sub
+instance HasLink sub => HasLink (Header' mods sym a :> sub) where
+    type MkLink (Header' mods sym a :> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (Vault :> sub) where
+    type MkLink (Vault :> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (Description s :> sub) where
+    type MkLink (Description s :> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (Summary s :> sub) where
+    type MkLink (Summary s :> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (HttpVersion :> sub) where
+    type MkLink (HttpVersion:> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (IsSecure :> sub) where
+    type MkLink (IsSecure :> sub) = MkLink sub
+    toLink _ = toLink (Proxy :: Proxy sub)
+
+instance HasLink sub => HasLink (WithNamedContext name context sub) where
+    type MkLink (WithNamedContext name context sub) = MkLink sub
     toLink _ = toLink (Proxy :: Proxy sub)
 
 instance HasLink sub => HasLink (RemoteHost :> sub) where
@@ -251,11 +385,28 @@ instance HasLink sub => HasLink (BasicAuth realm a :> sub) where
     type MkLink (BasicAuth realm a :> sub) = MkLink sub
     toLink _ = toLink (Proxy :: Proxy sub)
 
+instance HasLink EmptyAPI where
+    type MkLink EmptyAPI = EmptyAPI
+    toLink _ _ = EmptyAPI
+
 -- Verb (terminal) instances
 instance HasLink (Verb m s ct a) where
     type MkLink (Verb m s ct a) = Link
-    toLink _ = id 
+    toLink _ = id
 
 instance HasLink Raw where
     type MkLink Raw = Link
     toLink _ = id
+
+instance HasLink (Stream m fr ct a) where
+    type MkLink (Stream m fr ct a) = Link
+    toLink _ = id
+
+-- AuthProtext instances
+instance HasLink sub => HasLink (AuthProtect tag :> sub) where
+  type MkLink (AuthProtect tag :> sub) = MkLink sub
+  toLink _ = toLink (Proxy :: Proxy sub)
+
+-- $setup
+-- >>> import Servant.API
+-- >>> import Data.Text (Text)

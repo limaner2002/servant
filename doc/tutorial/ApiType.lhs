@@ -79,7 +79,7 @@ type UserAPI2 = "users" :> "list-all" :> Get '[JSON] [User]
 
 **servant** provides a fair amount of combinators out-of-the-box, but you can
 always write your own when you need it. Here's a quick overview of the most
-often needed the combinators that **servant** comes with.
+often needed combinators that **servant** comes with.
 
 ## Combinators
 
@@ -126,6 +126,19 @@ An endpoint always ends with a variant of the `Verb` combinator
 type UserAPI4 = "users" :> Get '[JSON] [User]
            :<|> "admins" :> Get '[JSON] [User]
 ```
+
+### `StreamGet` and `StreamPost`
+
+The `StreamGet` and `StreamPost` combinators are defined in terms of the more general `Stream`
+
+``` haskell ignore
+data Stream (method :: k1) (framing :: *) (contentType :: *) a
+type StreamGet  = Stream 'GET
+type StreamPost = Stream 'POST
+```
+
+These describe endpoints that return a stream of values rather than just a single value. They not only take a single content type as a paremeter, but also a framing strategy -- this specifies how the individual results are deliniated from one another in the stream. The two standard strategies given with Servant are `NewlineFraming` and `NetstringFraming`, but others can be written to match other protocols.
+
 
 ### `Capture`
 
@@ -321,10 +334,32 @@ data BasicAuth (realm :: Symbol) (userData :: *)
 Which is used like so:
 
 ``` haskell
-type ProtectedAPI12
+type ProtectedAPI11
      = UserAPI                              -- this is public
  :<|> BasicAuth "my-realm" User :> UserAPI2 -- this is protected by auth
 ```
+
+### Empty APIs
+
+Sometimes it is useful to be able to generalise an API over the type of some
+part of it:
+
+``` haskell
+type UserAPI12 innerAPI
+     = UserAPI             -- this is the fixed bit of the API
+ :<|> "inner" :> innerAPI  -- this lets us put various other APIs under /inner
+```
+
+If there is a case where you do not have anything extra to serve, you can use
+the `EmptyAPI` combinator to indicate this:
+
+``` haskell
+type UserAPI12Alone = UserAPI12 EmptyAPI
+```
+
+This also works well as a placeholder for unfinished parts of an API while it
+is under development, for when you know that there should be _something_ there
+but you don't yet know what. Think of it as similar to the unit type `()`.
 
 ### Interoperability with `wai`: `Raw`
 
@@ -334,7 +369,7 @@ you want to plug a [wai `Application`](http://hackage.haskell.org/package/wai)
 into your webservice:
 
 ``` haskell
-type UserAPI11 = "users" :> Get '[JSON] [User]
+type UserAPI13 = "users" :> Get '[JSON] [User]
                  -- a /users endpoint
 
             :<|> Raw
